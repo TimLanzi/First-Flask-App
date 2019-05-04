@@ -1,6 +1,7 @@
 from flask import render_template, redirect, request, url_for, flash
 from flask_login import login_user, logout_user, login_required, current_user
 from . import auth
+from .. import db
 from ..models import User
 from ..email import send_email
 from .forms import LoginForm, RegistrationForm
@@ -8,11 +9,13 @@ from .forms import LoginForm, RegistrationForm
 
 @auth.before_app_request
 def before_request():
-  if current_user.is_authenticated \
-      and not current_user.confirmed \
-      and request.blueprint != 'auth'\
-      and request.endpoint != 'static':
-    return redirect(url_for('auth.unconfirmed'))
+  if current_user.is_authenticated:
+    current_user.ping()
+    if not current_user.confirmed\
+        and request.endpoint \
+        and request.blueprint != 'auth' \
+        and request.endpoint != 'static':
+      return redirect(url_for('auth.unconfirmed'))
 
 
 @auth.route('/register', methods=['GET', 'POST'])
@@ -23,7 +26,7 @@ def register():
     db.session.add(user)
     db.session.commit()
     token = user.generate_confirmation_token()
-    send_mail(user.email, 'Confirm Your Account', 'auth/email/confirm', user=user, token=token)
+    send_email(user.email, 'Confirm Your Account', 'auth/email/confirm', user=user, token=token)
     flash('A confirmation email has been sent to by email.')
     return redirect(url_for('main.index'))
   return render_template('auth/register.html', form=form)
@@ -55,7 +58,7 @@ def logout():
 @login_required
 def resend_confirmation():
   token = current_user.generate_confirmation_token()
-  send_mail(current_user.email, 'Confirm Your Account', 'auth/email/confirm', user=current_user, token=token)
+  send_email(current_user.email, 'Confirm Your Account', 'auth/email/confirm', user=current_user, token=token)
   flash('A new confirmation email has been sent to you by email.')
   return redirect(url_for('main.index'))
 
