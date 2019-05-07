@@ -5,10 +5,21 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
 from flask_login import UserMixin, AnonymousUserMixin
 from flask import current_app, request
+from markdown import markdown
+import bleach
 
 @login_manager.user_loader
 def load_user(user_id):
   return User.query.get(int(user_id))
+
+
+class Permission:
+  FOLLOW = 1
+  COMMENT = 2
+  WRITE = 4
+  MODERATE = 8
+  ADMIN = 16
+
 
 class Role(db.Model):
   __tablename__ = 'roles'
@@ -60,6 +71,13 @@ class Role(db.Model):
     return '<Role %r>' % self.name
 
 
+class Follow(db.Model):
+  __tablename__ = 'follows'
+  follower_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
+  followed_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
+  timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class User(UserMixin, db.Model):
   __tablename__ = 'users'
   id = db.Column(db.Integer, primary_key=True)
@@ -75,6 +93,16 @@ class User(UserMixin, db.Model):
   last_seen = db.Column(db.DateTime(), default=datetime.utcnow)
   avatar_hash = db.Column(db.String(32))
   posts = db.relationship('Post', backref='author', lazy='dynamic')
+  followed = db.relationship('Follow',\
+      foreign_keys=[Follow.follower_id],\
+      backref=db.backref('follower', lazy='joined'),\
+      lazy='dynamic',\
+      cascade='all, delete-orphan')
+  followers = db.relationship('Follow',\
+     foreign_keys=[Follow.followed_id],\
+     backref=db.backref('followed', lazy='joined'),\
+     lazy='dynamic',\
+     cascade='all, delete-orphan')
 
   def __init__(self, **kwargs):
     super(User, self).__init__(**kwargs)
@@ -89,6 +117,11 @@ class User(UserMixin, db.Model):
   @property
   def password(self):
     raise AttributeError('password is not a readable attribute')
+
+  @property
+  def followed_posts(self):
+    return Post.query.join(Follow, Follow.followed_id == Post.author_id)\
+      .filter(Follow.follower_id == self.id)
 
   @password.setter
   def password(self, password):
@@ -135,8 +168,27 @@ class User(UserMixin, db.Model):
       hash = self.avatar_hash or self.gravatar_hash()
       return '{url}/{hash}?s={size}&d={default}&r={rating}'.format(url=url, hash=hash, size=size, default=default, rating=rating)
 
+  def follow(self, user):
+    if not self.is_following(user):
+      f = Follow(follower=self, followed=user)
+
+  def unfollow(self, user):
+    f = self.followed.filter_by(followed_id=user.id).first()
+    if f:
+      db.session.delete(f)
+
+  def is_following(self, user):
+    if user.id is None:
+      return False
+    return self.followed.filter_by(followed_id=user.id).first() is not None
+
+  def is_followed_by(self, user):
+    if user.id is None:
+      return False
+    return self.followers.filter_by(follower_id=user.id).first() is not None
+
   def __repr__(self):
-    return '<User %r>' % self.username
+    return '<User %r>' % self.email
 
 
 class AnonymousUser(AnonymousUserMixin):
@@ -145,22 +197,21 @@ class AnonymousUser(AnonymousUserMixin):
 
   def is_administrator(self):
     return False
-    
-
-login_manager.anonymous_user = AnonymousUser
-
-
-class Permission:
-  FOLLOW = 1
-  COMMENT = 2
-  WRITE = 4
-  MODERATE = 8
-  ADMIN = 16
 
 
 class Post(db.Model):
   __tablename__ = 'posts'
   id = db.Column(db.Integer, primary_key=True)
   body = db.Column(db.Text)
+  body_html = db.Column(db.Text)
   timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
   author_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+
+  @staticmethod
+  def on_changed_body(target, value, oldvalue, initiator):
+    allowed_tags = ['a', 'abbr', 'acronym', 'b', 'blockquote', 'code', 'em', 'i', 'li', 'ol', 'pre', 'strong', 'ul', 'h1', 'h2', 'h3', 'p']
+    target.body_html = bleach.linkify(bleach.clean(markdown(value, output_format='html'), tags=allowed_tags, strip=True))
+
+
+login_manager.anonymous_user = AnonymousUser
+db.event.listen(Post.body, 'set', Post.on_changed_body)
